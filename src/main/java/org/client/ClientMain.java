@@ -40,7 +40,7 @@ public class ClientMain extends Application {
         zombieImage = new Image(getClass().getResource("/images/zombie.png").toExternalForm());
 
 
-        networkClient = new NetworkClient("localhost", 5000, this::onServerMessage);
+        networkClient = new NetworkClient("3.70.131.13", 5000, this::onServerMessage);
         networkClient.start();
 
         scene.setOnKeyPressed(event -> {

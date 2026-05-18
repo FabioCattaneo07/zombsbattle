@@ -54,4 +54,8 @@ public class GameServer {
         world.removePlayer(client.getPlayerId());
         System.out.println("Client disconnesso. Player ID = " + client.getPlayerId());
     }
+
+    public boolean hasPlayers() {
+        return !clients.isEmpty();
+    }
 }
