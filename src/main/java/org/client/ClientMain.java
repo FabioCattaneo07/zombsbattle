@@ -8,6 +8,7 @@ import javafx.scene.canvas.GraphicsContext;
 import javafx.scene.input.KeyCode;
 import javafx.scene.layout.BorderPane;
 import javafx.scene.paint.Color;
+import javafx.scene.text.Font;
 import javafx.stage.Stage;
 
 import java.util.ArrayList;
@@ -17,13 +18,31 @@ import javafx.scene.image.Image;
 
 public class ClientMain extends Application {
 
+    private enum ZombieType {
+        NORMAL,
+        BIG,
+        FAST
+    }
+
+    private enum MatchState {
+        RUNNING,
+        LOST,
+        WON
+    }
+
     private final Canvas canvas = new Canvas(800, 600);
     private NetworkClient networkClient;
     private Image zombieImage;
+    private Image bigZombieImage;
+    private Image fastZombieImage;
+    private Image player1Image;
+    private Image player2Image;
     private int myId = -1;
+    private MatchState matchState = MatchState.RUNNING;
+    private long restartCountdownMs = 0;
 
     private final List<PlayerView> players = new ArrayList<>();
-    private final List<Entity> zombies = new ArrayList<>();
+    private final List<ZombieView> zombies = new ArrayList<>();
     private final List<Entity> medkits = new ArrayList<>();
     private final List<ShotView> shots = new ArrayList<>();
     private final List<RectView> walls = new ArrayList<>();
@@ -37,13 +56,19 @@ public class ClientMain extends Application {
         BorderPane root = new BorderPane(canvas);
         Scene scene = new Scene(root, 800, 600);
 
-        zombieImage = new Image(getClass().getResource("/images/zombie.png").toExternalForm());
+        zombieImage = loadImage("/images/zombie.png");
+        bigZombieImage = loadImage("/images/bigzombie.png");
+        fastZombieImage = loadImage("/images/fastzombie.png");
+        player1Image = loadImage("/images/player1.png");
+        player2Image = loadImage("/images/player2.png");
 
-
+//3.70.131.13
         networkClient = new NetworkClient("3.70.131.13", 5000, this::onServerMessage);
         networkClient.start();
 
         scene.setOnKeyPressed(event -> {
+            if (!isInputEnabled()) return;
+
             KeyCode code = event.getCode();
 
             if (code == KeyCode.W || code == KeyCode.UP) networkClient.send("MOVE_UP");
@@ -53,6 +78,8 @@ public class ClientMain extends Application {
         });
 
         scene.setOnMouseClicked(event -> {
+            if (!isInputEnabled()) return;
+
             networkClient.send("SHOOT " + event.getX() + " " + event.getY());
         });
 
@@ -90,7 +117,14 @@ public class ClientMain extends Application {
         for (String part : parts) {
             if (part.equals("STATE")) continue;
 
+            if (part.startsWith("MATCH")) {
+                parseMatchState(part);
+                continue;
+            }
+
             String[] data = part.split(",");
+
+            if (data.length < 4) continue;
 
             String type = data[0];
             int id = Integer.parseInt(data[1]);
@@ -103,7 +137,7 @@ public class ClientMain extends Application {
                     int ammo = Integer.parseInt(data[5]);
                     players.add(new PlayerView(id, x, y, health, ammo));
                 }
-                case "ZOMBIE" -> zombies.add(new Entity(id, x, y));
+                case "ZOMBIE" -> zombies.add(parseZombieView(id, x, y, data));
                 case "MEDKIT" -> medkits.add(new Entity(id, x, y));
                 case "SHOT" -> {
                     double x2 = Double.parseDouble(data[4]);
@@ -130,6 +164,61 @@ public class ClientMain extends Application {
         }
     }
 
+    private ZombieView parseZombieView(int id, double x, double y, String[] data) {
+        ZombieType zombieType = ZombieType.NORMAL;
+        int health = 1;
+
+        if (data.length >= 5) {
+            try {
+                zombieType = ZombieType.valueOf(data[4]);
+            } catch (IllegalArgumentException ignored) {
+                zombieType = ZombieType.NORMAL;
+            }
+        }
+
+        if (data.length >= 6) {
+            try {
+                health = Integer.parseInt(data[5]);
+            } catch (NumberFormatException ignored) {
+                health = zombieType == ZombieType.BIG ? 2 : 1;
+            }
+        } else if (zombieType == ZombieType.BIG) {
+            health = 2;
+        }
+
+        return new ZombieView(id, x, y, zombieType, health);
+    }
+
+    private Image loadImage(String path) {
+        var url = getClass().getResource(path);
+        return url == null ? null : new Image(url.toExternalForm());
+    }
+
+    private double screenX(double worldX) {
+        return worldX;
+    }
+
+    private double screenY(double worldY) {
+        return worldY;
+    }
+
+    private void parseMatchState(String part) {
+        String[] data = part.split(",");
+        if (data.length < 3) return;
+
+        try {
+            matchState = MatchState.valueOf(data[1]);
+        } catch (IllegalArgumentException ignored) {
+            matchState = MatchState.RUNNING;
+        }
+
+        try {
+            restartCountdownMs = Long.parseLong(data[2]);
+        } catch (NumberFormatException ignored) {
+            restartCountdownMs = 0;
+        }
+    }
+
     private void draw() {
         GraphicsContext g = canvas.getGraphicsContext2D();
 
@@ -143,6 +232,7 @@ public class ClientMain extends Application {
         drawZombies(g);
         drawPlayers(g);
         drawHud(g);
+        drawMatchOverlay(g);
     }
 
     private void drawBackground(GraphicsContext g) {
@@ -250,18 +340,58 @@ public class ClientMain extends Application {
     }
 
     private void drawZombies(GraphicsContext g) {
-        for (Entity zombie : zombies) {
-            g.drawImage(zombieImage, zombie.x - 15, zombie.y - 15, 30, 30);
+        for (ZombieView zombie : zombies) {
+            drawZombie(g, zombie);
         }
+    }
+
+    private void drawZombie(GraphicsContext g, ZombieView zombie) {
+        double size = zombie.getRenderSize();
+        Image sprite = switch (zombie.type) {
+            case BIG -> bigZombieImage != null ? bigZombieImage : zombieImage;
+            case FAST -> fastZombieImage != null ? fastZombieImage : zombieImage;
+            default -> zombieImage;
+        };
+
+        if (sprite != null) {
+            g.drawImage(sprite, screenX(zombie.x) - size / 2, screenY(zombie.y) - size / 2, size, size);
+            return;
+        }
+
+        g.setFill(switch (zombie.type) {
+            case BIG -> Color.DARKRED;
+            case FAST -> Color.LIGHTSEAGREEN;
+            default -> Color.DARKGREEN;
+        });
+        g.fillOval(screenX(zombie.x) - size / 2, screenY(zombie.y) - size / 2, size, size);
     }
 
     private void drawPlayers(GraphicsContext g) {
         for (PlayerView player : players) {
-            g.setFill(player.id == myId ? Color.DODGERBLUE : Color.ORANGE);
-            g.fillOval(player.x - 12, player.y - 12, 24, 24);
+            boolean isMe = player.id == myId;
+            double x = screenX(player.x);
+            double y = screenY(player.y);
+            boolean isFirstPlayer = player.id == 1;
+            boolean isSecondPlayer = player.id == 2;
+
+            if (isFirstPlayer || isSecondPlayer) {
+                double spriteWidth = 36;
+                double spriteHeight = 48;
+                Image sprite = isFirstPlayer ? player1Image : player2Image;
+
+                if (sprite != null) {
+                    g.drawImage(sprite, x - spriteWidth / 2, y - spriteHeight / 2, spriteWidth, spriteHeight);
+                } else {
+                    g.setFill(isFirstPlayer ? Color.LIGHTGRAY : Color.PURPLE);
+                    g.fillOval(x - spriteWidth / 2, y - spriteHeight / 2, spriteWidth, spriteHeight);
+                }
+            } else {
+                g.setFill(isMe ? Color.DODGERBLUE : Color.ORANGE);
+                g.fillOval(x - 12, y - 12, 24, 24);
+            }
 
             g.setFill(Color.WHITE);
-            g.fillText("P" + player.id, player.x - 8, player.y - 20);
+            g.fillText("P" + player.id, x - 8, y - 20);
 
             drawHealthBar(g, player);
         }
@@ -278,11 +408,12 @@ public class ClientMain extends Application {
         }
 
         g.setFill(Color.rgb(0, 0, 0, 0.45));
-        g.fillRect(8, 8, 360, 95);
+        g.fillRect(8, 8, 360, 120);
 
         g.setFill(Color.WHITE);
         g.fillText("WASD/Frecce = movimento | Click = spara", 15, 25);
         g.fillText("Fiume = velocità -50% | Obiettivo centrale: 200 HP", 15, 45);
+        g.fillText("Stato: " + matchLabel(), 15, 105);
 
         if (me != null) {
             g.fillText("Vita: " + me.health + "/100", 15, 65);
@@ -293,8 +424,8 @@ public class ClientMain extends Application {
     private void drawHealthBar(GraphicsContext g, PlayerView player) {
         double barWidth = 40;
         double barHeight = 6;
-        double x = player.x - barWidth / 2;
-        double y = player.y + 18;
+        double x = screenX(player.x) - barWidth / 2;
+        double y = screenY(player.y) + 18;
 
         g.setFill(Color.DARKRED);
         g.fillRect(x, y, barWidth, barHeight);
@@ -304,6 +435,56 @@ public class ClientMain extends Application {
 
         g.setStroke(Color.WHITE);
         g.strokeRect(x, y, barWidth, barHeight);
+    }
+
+    private void drawMatchOverlay(GraphicsContext g) {
+        if (matchState == MatchState.RUNNING) return;
+
+        double pulse = 0.25 + 0.15 * Math.sin(System.currentTimeMillis() / 140.0);
+
+        if (matchState == MatchState.LOST) {
+            g.setFill(Color.rgb(140, 0, 0, 0.55 + pulse));
+        } else {
+            g.setFill(Color.rgb(0, 90, 0, 0.50 + pulse));
+        }
+
+        g.fillRect(0, 0, 800, 600);
+
+        g.setFill(Color.WHITE);
+        g.setFont(Font.font("Arial", 34));
+        g.fillText(matchTitle(), 130, 255);
+
+        g.setFont(Font.font("Arial", 20));
+        g.fillText(matchSubtitle(), 175, 290);
+        g.fillText("Riavvio automatico tra " + (restartCountdownMs / 1000.0) + "s", 230, 325);
+    }
+
+    private String matchTitle() {
+        return switch (matchState) {
+            case LOST -> "SEI MORTO";
+            case WON -> "COMPLIMENTI, HAI VINTO!";
+            default -> "";
+        };
+    }
+
+    private String matchSubtitle() {
+        return switch (matchState) {
+            case LOST -> "Il server riparte tra pochi secondi.";
+            case WON -> "GIOCA DI NUOVO - la partita ricomincia a breve.";
+            default -> "";
+        };
+    }
+
+    private String matchLabel() {
+        return switch (matchState) {
+            case LOST -> "FINE PARTITA";
+            case WON -> "VITTORIA";
+            default -> "IN CORSO";
+        };
+    }
+
+    private boolean isInputEnabled() {
+        return matchState == MatchState.RUNNING && networkClient != null;
     }
 
     @Override
@@ -322,6 +503,25 @@ public class ClientMain extends Application {
             this.id = id;
             this.x = x;
             this.y = y;
+        }
+    }
+
+    private static class ZombieView extends Entity {
+        ZombieType type;
+        int health;
+
+        ZombieView(int id, double x, double y, ZombieType type, int health) {
+            super(id, x, y);
+            this.type = type;
+            this.health = health;
+        }
+
+        double getRenderSize() {
+            return switch (type) {
+                case BIG -> 38;
+                case FAST -> 24;
+                default -> 30;
+            };
         }
     }
 

@@ -4,6 +4,18 @@ import java.util.*;
 
 public class GameWorld {
 
+    private enum MatchState {
+        RUNNING,
+        LOST,
+        WON
+    }
+
+    private static final int INITIAL_ZOMBIES = 6;
+    private static final int INITIAL_MEDKITS = 4;
+    private static final int MIN_ACTIVE_ZOMBIES = 8;
+    private static final long MATCH_RESTART_DELAY_MS = 4500;
+    private static final long ZOMBIE_SPAWN_INTERVAL_MS = 3000;
+
     private final Map<Integer, Player> players = new HashMap<>();
     private final List<Zombie> zombies = new ArrayList<>();
     private final List<Medkit> medkits = new ArrayList<>();
@@ -15,6 +27,9 @@ public class GameWorld {
     private final Objective objective = new Objective(400, 300);
 
     private final Random random = new Random();
+
+    private MatchState matchState = MatchState.RUNNING;
+    private long matchEndedAt = 0;
 
     private int nextPlayerId = 1;
     private int nextZombieId = 1;
@@ -30,15 +45,7 @@ public class GameWorld {
 
     public GameWorld() {
         createMap();
-
-        zombies.add(new Zombie(nextZombieId++, 250, 200));
-        zombies.add(new Zombie(nextZombieId++, 500, 350));
-        zombies.add(new Zombie(nextZombieId++, 650, 150));
-
-        spawnMedkit();
-        spawnMedkit();
-        spawnMedkit();
-        spawnMedkit();
+        resetMatch();
     }
 
     private void createMap() {
@@ -69,7 +76,41 @@ public class GameWorld {
         players.remove(id);
     }
 
+    public synchronized boolean isMatchOver() {
+        return matchState != MatchState.RUNNING;
+    }
+
+    public synchronized boolean shouldRestartMatch() {
+        return matchState != MatchState.RUNNING
+                && System.currentTimeMillis() - matchEndedAt >= MATCH_RESTART_DELAY_MS;
+    }
+
+    public synchronized void resetMatch() {
+        zombies.clear();
+        medkits.clear();
+        shots.clear();
+
+        objective.health = Objective.MAX_HEALTH;
+        nextZombieId = 1;
+        nextMedkitId = 1;
+        lastZombieSpawnTime = System.currentTimeMillis();
+        matchState = MatchState.RUNNING;
+        matchEndedAt = 0;
+
+        for (Player player : players.values()) {
+            player.resetForNewMatch();
+        }
+
+        spawnInitialZombies();
+
+        for (int i = 0; i < INITIAL_MEDKITS; i++) {
+            spawnMedkit();
+        }
+    }
+
     public synchronized void handleCommand(int playerId, String command) {
+        if (matchState != MatchState.RUNNING) return;
+
         Player player = players.get(playerId);
         if (player == null) return;
 
@@ -139,7 +180,7 @@ public class GameWorld {
 
             double distanceToLine = distance(zombie.x, zombie.y, closestX, closestY);
 
-            if (distanceToLine < 18 && distanceAlongRay < bestDistance) {
+            if (distanceToLine < zombie.getHitRadius() && distanceAlongRay < bestDistance) {
                 bestDistance = distanceAlongRay;
                 hitZombie = zombie;
             }
@@ -167,18 +208,29 @@ public class GameWorld {
             objective.health -= 5;
             if (objective.health < 0) objective.health = 0;
 
+            if (objective.health == 0) {
+                triggerMatchEnd(MatchState.WON);
+            }
+
             endX = objective.x;
             endY = objective.y;
         } else if (hitZombie != null) {
             endX = hitZombie.x;
             endY = hitZombie.y;
-            zombies.remove(hitZombie);
+
+            if (hitZombie.damage(1)) {
+                zombies.remove(hitZombie);
+            }
         }
 
         shots.add(new Shot(player.x, player.y, endX, endY));
     }
 
     public synchronized void update() {
+        if (matchState != MatchState.RUNNING) {
+            return;
+        }
+
         for (Player player : players.values()) {
             player.updateReload();
         }
@@ -205,7 +257,6 @@ public class GameWorld {
     }
 
     private void moveZombieToward(Zombie zombie, double targetX, double targetY) {
-
         double originalSpeed = zombie.speed;
 
         if (isInRiver(zombie.x, zombie.y)) {
@@ -235,9 +286,18 @@ public class GameWorld {
     private void spawnZombiesOverTime() {
         long now = System.currentTimeMillis();
 
-        if (now - lastZombieSpawnTime >= 5000) {
+        if (now - lastZombieSpawnTime >= ZOMBIE_SPAWN_INTERVAL_MS) {
             spawnZombie();
+            if (zombies.size() < MIN_ACTIVE_ZOMBIES || random.nextBoolean()) {
+                spawnZombie();
+            }
             lastZombieSpawnTime = now;
+        }
+    }
+
+    private void spawnInitialZombies() {
+        for (int i = 0; i < INITIAL_ZOMBIES; i++) {
+            spawnZombie();
         }
     }
 
@@ -265,7 +325,21 @@ public class GameWorld {
             }
         }
 
-        zombies.add(new Zombie(nextZombieId++, x, y));
+        zombies.add(new Zombie(nextZombieId++, x, y, rollZombieType()));
+    }
+
+    private Zombie.Type rollZombieType() {
+        int roll = random.nextInt(100);
+
+        if (roll < 70) {
+            return Zombie.Type.NORMAL;
+        }
+
+        if (roll < 90) {
+            return Zombie.Type.BIG;
+        }
+
+        return Zombie.Type.FAST;
     }
 
     private Player findNearestPlayer(Zombie zombie) {
@@ -291,12 +365,17 @@ public class GameWorld {
             for (Zombie zombie : zombies) {
                 double distance = distance(player.x, player.y, zombie.x, zombie.y);
 
-                if (distance < 25 && now - player.lastDamageTime > 700) {
+                if (distance < 12 + zombie.getHitRadius() && now - player.lastDamageTime > 700) {
                     player.health -= 10;
                     player.lastDamageTime = now;
 
                     if (player.health < 0) {
                         player.health = 0;
+                    }
+
+                    if (player.health == 0) {
+                        triggerMatchEnd(MatchState.LOST);
+                        return;
                     }
                 }
             }
@@ -347,10 +426,24 @@ public class GameWorld {
         return Math.sqrt(dx * dx + dy * dy);
     }
 
+    private void triggerMatchEnd(MatchState newState) {
+        if (matchState != MatchState.RUNNING) return;
+
+        matchState = newState;
+        matchEndedAt = System.currentTimeMillis();
+    }
+
     public synchronized String serialize() {
         StringBuilder sb = new StringBuilder();
 
         sb.append("STATE");
+
+        long remaining = matchState == MatchState.RUNNING ? 0 : Math.max(0, MATCH_RESTART_DELAY_MS - (System.currentTimeMillis() - matchEndedAt));
+
+        sb.append("|MATCH,")
+                .append(matchState.name())
+                .append(",")
+                .append(remaining);
 
         sb.append("|RIVER,0,")
                 .append((int) riverX).append(",")
@@ -392,7 +485,9 @@ public class GameWorld {
             sb.append("|ZOMBIE,")
                     .append(z.id).append(",")
                     .append((int) z.x).append(",")
-                    .append((int) z.y);
+                    .append((int) z.y).append(",")
+                    .append(z.type.name()).append(",")
+                    .append(z.health);
         }
 
         for (Medkit m : medkits) {

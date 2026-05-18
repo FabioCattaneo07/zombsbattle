@@ -31,6 +31,19 @@ public class GameLoop extends Thread {
                     continue;
                 }
 
+                if (world.isMatchOver()) {
+                    server.broadcast(world.serialize());
+
+                    if (world.shouldRestartMatch()) {
+                        System.out.println("Match concluso. Riavvio del server/match...");
+                        world.resetMatch();
+                        server.broadcast(world.serialize());
+                    }
+
+                    Thread.sleep(50);
+                    continue;
+                }
+
                 // Primo player entrato
                 if (sleeping) {
                     System.out.println("Player rilevato. Ripresa game loop.");
