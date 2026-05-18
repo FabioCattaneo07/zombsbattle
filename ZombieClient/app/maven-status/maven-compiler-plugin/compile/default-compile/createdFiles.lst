@@ -1,0 +1,14 @@
+org\server\Zombie.class
+org\client\ClientMain.class
+org\server\GameLoop.class
+org\server\ServerMain.class
+org\client\NetworkClient.class
+org\server\GameServer.class
+org\client\ClientMain$PlayerView.class
+org\server\Medkit.class
+it\outbreak\server\ServerMain.class
+org\client\ClientMain$Entity.class
+org\server\ClientHandler.class
+org\client\Launcher.class
+org\server\GameWorld.class
+org\server\Player.class
